@@ -1,0 +1,62 @@
+name: AI Cycling Coach
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # 每小時整點執行
+  workflow_dispatch:        # 允許手動觸發（測試用）
+
+permissions:
+  contents: write           # 允許 commit processed_ids.txt 回 repo
+
+jobs:
+  run-coach:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. 取得程式碼 ────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. 設定 Python 環境 ──────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 3. 從 Secret 還原 tokens.json ───────────────────────────────────
+      # TOKENS_JSON secret 存放 tokens.json 的完整 JSON 字串
+      # 初始設定方式：cat tokens.json | gh secret set TOKENS_JSON
+      - name: Restore tokens.json from secret
+        run: echo '${{ secrets.TOKENS_JSON }}' > tokens.json
+
+      # ── 4. 執行主程式 ────────────────────────────────────────────────────
+      - name: Run AI Coach
+        env:
+          STRAVA_CLIENT_ID:     ${{ secrets.STRAVA_CLIENT_ID }}
+          STRAVA_CLIENT_SECRET: ${{ secrets.STRAVA_CLIENT_SECRET }}
+          OPENAI_API_KEY:       ${{ secrets.OPENAI_API_KEY }}
+          DISCORD_WEBHOOK_URL:  ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python main.py
+
+      # ── 5. 若 token 在本次執行中被刷新，更新 TOKENS_JSON secret ─────────
+      # 需要一個有 secrets:write 權限的 PAT，存為 GH_PAT secret
+      # 建立方式：GitHub > Settings > Developer settings > Personal access tokens
+      #           > Fine-grained tokens > 權限選 Repository secrets: Read and write
+      - name: Update TOKENS_JSON secret if token was refreshed
+        run: gh secret set TOKENS_JSON < tokens.json
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+
+      # ── 6. 把更新後的 processed_ids.txt commit 回 repo ──────────────────
+      # [skip ci] 標記讓這個 commit 不會觸發新一輪 workflow
+      - name: Commit processed_ids.txt
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add processed_ids.txt
+          git diff --staged --quiet || git commit -m "chore: update processed activity IDs [skip ci]"
+          git push
