@@ -36,6 +36,9 @@ from strava_client     import StravaClient
 from ai_coach          import AICoach
 from discord_notifier  import DiscordNotifier
 
+# 只分析這些騎車類型；其他活動（跑步、游泳等）直接標記已處理後跳過
+CYCLING_TYPES = {"Ride", "VirtualRide", "EBikeRide", "MountainBikeRide", "GravelRide"}
+
 # ── 日誌設定 ────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -130,12 +133,23 @@ def main() -> None:
     # ── 逐筆處理（由舊到新，確保按時間順序分析）──────────────────────────
     # Strava API 回傳順序為由新到舊，reverse 後從最舊的開始處理
     for activity_summary in reversed(new_activities):
+        activity_id   = activity_summary.get("id", "未知")
+        sport_type    = activity_summary.get("sport_type", "")
+        activity_name = activity_summary.get("name", "未命名")
+
+        # 非騎車活動：寫入 processed_ids.txt 後跳過，避免下次重複出現
+        if sport_type not in CYCLING_TYPES:
+            logger.info(
+                f"略過非騎車活動：「{activity_name}」(ID: {activity_id}, 類型: {sport_type})，已標記為已處理。"
+            )
+            strava.mark_as_processed(activity_id)
+            continue
+
         try:
             process_activity(activity_summary, strava, coach, notifier)
         except Exception as e:
-            activity_id = activity_summary.get("id", "未知")
             logger.error(f"處理活動 {activity_id} 時發生錯誤，跳過此筆：{e}", exc_info=True)
-            # 不標記為已處理，讓下次執行時重試
+            # 錯誤時不標記為已處理，讓下次執行時重試
             continue
 
     logger.info("===== 本次執行完畢 =====")
