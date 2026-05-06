@@ -83,13 +83,16 @@ def process_activity(
         f"心率 {cleaned['平均心率_bpm']} bpm"
     )
 
-    # 3. 呼叫 Claude 生成訓練分析報告
+    # 3. 呼叫 OpenAI 生成訓練分析報告
     ai_report = coach.analyze(cleaned)
 
-    # 4. 發送 Discord 通知
-    notifier.send(cleaned_data=cleaned, ai_report=ai_report)
+    # 4. 根據今日數據與分析，生成接下來 4 天訓練計畫
+    training_plan = coach.generate_training_plan(cleaned, ai_report)
 
-    # 5. 標記為已處理，避免下次重複分析
+    # 5. 發送 Discord 通知（分析報告 + 訓練計畫）
+    notifier.send(cleaned_data=cleaned, ai_report=ai_report, training_plan=training_plan)
+
+    # 6. 標記為已處理，避免下次重複分析
     strava.mark_as_processed(activity_id)
     logger.info(f"活動 {activity_id} 處理完畢。")
 

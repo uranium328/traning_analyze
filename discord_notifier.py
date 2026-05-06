@@ -85,17 +85,33 @@ class DiscordNotifier:
             },
         }
 
-    def _build_payload(self, cleaned_data: dict, ai_report: str) -> dict:
+    def _build_plan_embed(self, training_plan: str) -> dict:
+        """訓練計畫獨立 Embed，以綠色側邊條區隔視覺。"""
+        if len(training_plan) > MAX_DESCRIPTION_LEN:
+            plan_display = training_plan[:MAX_DESCRIPTION_LEN] + "\n\n*（計畫過長，已截斷）*"
+        else:
+            plan_display = training_plan
+
         return {
-            "username":   "AI 虛擬教練 🤖",
-            "embeds":     [self._build_embed(cleaned_data, ai_report)],
+            "title":       "📅 接下來的訓練計畫",
+            "description": plan_display,
+            "color":       0x57F287,  # Discord 綠，象徵往前衝
+        }
+
+    def _build_payload(self, cleaned_data: dict, ai_report: str, training_plan: str = "") -> dict:
+        embeds = [self._build_embed(cleaned_data, ai_report)]
+        if training_plan:
+            embeds.append(self._build_plan_embed(training_plan))
+        return {
+            "username": "AI 虛擬教練 🤖",
+            "embeds":   embeds,
         }
 
     # ── 發送 ──────────────────────────────────────────────────────────────
 
-    def send(self, cleaned_data: dict, ai_report: str) -> None:
-        """組裝 Embed 並發送到 Discord Webhook。"""
-        payload = self._build_payload(cleaned_data, ai_report)
+    def send(self, cleaned_data: dict, ai_report: str, training_plan: str = "") -> None:
+        """組裝 Embed 並發送到 Discord Webhook。training_plan 為選填。"""
+        payload = self._build_payload(cleaned_data, ai_report, training_plan)
         resp    = requests.post(self.webhook_url, json=payload, timeout=10)
 
         # Discord 成功回應：200（有內容）或 204（無內容）
