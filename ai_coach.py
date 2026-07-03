@@ -8,6 +8,8 @@ AICoach — OpenAI GPT 訓練分析模組
 
 import json
 import logging
+from typing import Optional
+
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
@@ -38,6 +40,9 @@ SYSTEM_PROMPT = """\
 3. 恢復與下步戰略 (Recovery & Tactics)：
    - 根據 TSS 或時間/爬升，下達嚴格但令人愉快的恢復指令。例如要求攝取大量優質碳水、甚至獎勵一塊法式甜點或可頌（非常 Pogačar 的風格）。
    - 給出明天或後天的訓練戰略指示。
+
+【恢復狀態整合】
+若使用者訊息附有「當日恢復數據」（睡眠、HRV、Body Battery、壓力、訓練準備度／訓練狀態），請在「恢復與下步戰略」段落結合這些數據，評估今天這趟訓練相對於學員的恢復狀態是否恰當（例如 HRV 偏低或睡眠不足時的高強度是否過猛），並據此微調恢復與隔日建議。若未附恢復數據，就僅依訓練數據給建議，切勿杜撰恢復數字。
 """
 
 TRAINING_PLAN_PROMPT = """\
@@ -52,6 +57,9 @@ TRAINING_PLAN_PROMPT = """\
 - 善用 Emoji 讓每天的排程一目瞭然（例如 🟢 輕鬆、🟡 中強度、🔴 高強度、💤 休息）。
 - 在計畫末尾加一句「總監指令」，用充滿熱情的語氣激勵學員執行計畫。
 - 排版使用 Discord Markdown（粗體、條列），不要使用標題符號 #。
+
+【恢復狀態鐵則】
+若輸入附有「當日恢復數據」且訓練準備度（readiness）偏低，或訓練狀態（training status）為 Overreaching／過度負荷，Day +1 必須安排為休息（💤）或 Zone 1 輕鬆恢復，不得排中高強度。
 """
 
 
@@ -59,9 +67,10 @@ class AICoach:
     def __init__(self, api_key: str):
         self.client = OpenAI(api_key=api_key)
 
-    def analyze(self, cleaned_data: dict) -> str:
+    def analyze(self, cleaned_data: dict, wellness_data: Optional[dict] = None) -> str:
         """
         將清洗後的活動字典轉為 JSON 字串，送入 GPT-4o 生成訓練分析報告。
+        wellness_data（選填）為當日恢復數據，附上時會請教練結合恢復狀態評估。
         回傳純文字的 Markdown 格式報告。
         """
         data_str     = json.dumps(cleaned_data, ensure_ascii=False, indent=2)
@@ -69,6 +78,14 @@ class AICoach:
             "以下是這次訓練的完整數據，請給我詳細的教練回饋報告：\n\n"
             f"```json\n{data_str}\n```"
         )
+
+        if wellness_data:
+            wellness_str = json.dumps(wellness_data, ensure_ascii=False, indent=2)
+            user_message += (
+                "\n\n以下是學員「當日恢復數據」（睡眠、HRV、Body Battery、壓力、"
+                "訓練準備度／狀態），請結合這些評估今天的訓練是否恰當：\n\n"
+                f"```json\n{wellness_str}\n```"
+            )
 
         activity_id = cleaned_data.get("activity_id", "未知")
         logger.info(f"呼叫 OpenAI API 分析活動 {activity_id}（模型：{MODEL}）...")
@@ -90,9 +107,15 @@ class AICoach:
         )
         return report
 
-    def generate_training_plan(self, cleaned_data: dict, analysis_report: str) -> str:
+    def generate_training_plan(
+        self,
+        cleaned_data: dict,
+        analysis_report: str,
+        wellness_data: Optional[dict] = None,
+    ) -> str:
         """
         以今日活動數據與分析報告為上下文，生成接下來 4 天的訓練計畫。
+        wellness_data（選填）附上時，套用「恢復狀態鐵則」（準備度低／過度負荷 → Day+1 休息）。
         獨立 API 呼叫，確保計畫專注且格式工整。
         """
         data_str = json.dumps(
@@ -102,8 +125,11 @@ class AICoach:
         user_message = (
             f"今日訓練摘要數據：{data_str}\n\n"
             f"今日分析報告：\n{analysis_report}\n\n"
-            "請根據以上資訊，制定接下來 4 天的訓練計畫。"
         )
+        if wellness_data:
+            wellness_str = json.dumps(wellness_data, ensure_ascii=False)
+            user_message += f"學員當日恢復數據（含訓練準備度／狀態）：{wellness_str}\n\n"
+        user_message += "請根據以上資訊，制定接下來 4 天的訓練計畫。"
 
         activity_id = cleaned_data.get("activity_id", "未知")
         logger.info(f"呼叫 OpenAI API 生成活動 {activity_id} 的後續訓練計畫...")

@@ -17,41 +17,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. 設定 Python 環境 ──────────────────────────────────────────────
-      - name: Set up Python 3.11
+      # ── 2. 設定 Python 環境（garminconnect 0.3.6 需要 Python >= 3.12）─────
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
           cache: 'pip'
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # ── 3. 從 Secret 還原 tokens.json ───────────────────────────────────
-      # TOKENS_JSON secret 存放 tokens.json 的完整 JSON 字串
-      # 初始設定方式：cat tokens.json | gh secret set TOKENS_JSON
-      - name: Restore tokens.json from secret
-        run: echo '${{ secrets.TOKENS_JSON }}' > tokens.json
-
-      # ── 4. 執行主程式 ────────────────────────────────────────────────────
+      # ── 3. 執行主程式 ────────────────────────────────────────────────────
+      # 認證改用 Garmin token：GARMINTOKENS secret 由本機 login_setup.py 匯出的
+      # base64 token 字串（效期約一年），main.py 直接從環境變數還原登入，
+      # 不再需要 tokens.json 檔案，也不需要每小時回寫 secret（故已移除 GH_PAT 步驟）。
       - name: Run AI Coach
         env:
-          STRAVA_CLIENT_ID:     ${{ secrets.STRAVA_CLIENT_ID }}
-          STRAVA_CLIENT_SECRET: ${{ secrets.STRAVA_CLIENT_SECRET }}
-          OPENAI_API_KEY:       ${{ secrets.OPENAI_API_KEY }}
-          DISCORD_WEBHOOK_URL:  ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GARMINTOKENS:        ${{ secrets.GARMINTOKENS }}
+          OPENAI_API_KEY:      ${{ secrets.OPENAI_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python main.py
 
-      # ── 5. 若 token 在本次執行中被刷新，更新 TOKENS_JSON secret ─────────
-      # 需要一個有 secrets:write 權限的 PAT，存為 GH_PAT secret
-      # 建立方式：GitHub > Settings > Developer settings > Personal access tokens
-      #           > Fine-grained tokens > 權限選 Repository secrets: Read and write
-      - name: Update TOKENS_JSON secret if token was refreshed
-        run: gh secret set TOKENS_JSON < tokens.json
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-
-      # ── 6. 把更新後的 processed_ids.txt commit 回 repo ──────────────────
+      # ── 4. 把更新後的 processed_ids.txt commit 回 repo ──────────────────
       # [skip ci] 標記讓這個 commit 不會觸發新一輪 workflow
       - name: Commit processed_ids.txt
         run: |

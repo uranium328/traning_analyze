@@ -9,20 +9,16 @@ DiscordNotifier — Discord Webhook 推播模組
 import logging
 import requests
 from datetime import datetime
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # Discord Embed 側邊顏色（十進位 RGB）
-SPORT_COLORS = {
-    "Ride":        0xFC4C02,  # Strava 橘
-    "VirtualRide": 0xFC4C02,
-    "Run":         0x00B4D8,  # 藍
-    "Walk":        0x4CAF50,  # 綠
-    "Swim":        0x0096C7,  # 深藍
-}
-DEFAULT_COLOR = 0x7289DA     # Discord 紫
+CYCLING_COLOR  = 0x2FA4E7    # 騎車活動：Garmin 藍（notifier 只會收到騎車活動）
+WELLNESS_COLOR = 0x00B4D8    # 恢復數據：青色
+PLAN_COLOR     = 0x57F287    # 訓練計畫：Discord 綠
 
-STRAVA_ACTIVITY_URL = "https://www.strava.com/activities/{id}"
+GARMIN_ACTIVITY_URL = "https://connect.garmin.com/modern/activity/{id}"
 
 # Discord Embed description 上限為 4096 字元
 MAX_DESCRIPTION_LEN = 4000
@@ -36,9 +32,8 @@ class DiscordNotifier:
 
     def _build_embed(self, cleaned_data: dict, ai_report: str) -> dict:
         activity_id  = cleaned_data.get("activity_id")
-        sport_type   = cleaned_data.get("運動類型", "")
-        color        = SPORT_COLORS.get(sport_type, DEFAULT_COLOR)
-        activity_url = STRAVA_ACTIVITY_URL.format(id=activity_id)
+        color        = CYCLING_COLOR
+        activity_url = GARMIN_ACTIVITY_URL.format(id=activity_id)
         title        = f"🏅 新活動分析：{cleaned_data.get('活動名稱', '未命名活動')}"
 
         # ── Fields（摘要數字卡片）────────────────────────────────────────
@@ -52,7 +47,7 @@ class DiscordNotifier:
             {"name": "⛰️ 總爬升",     "value": val("總爬升_m", "m"),  "inline": True},
             {"name": "❤️ 平均心率",   "value": val("平均心率_bpm", "bpm"), "inline": True},
             {"name": "❤️‍🔥 最大心率", "value": val("最大心率_bpm", "bpm"), "inline": True},
-            {"name": "😓 Suffer Score", "value": val("Suffer_Score"),  "inline": True},
+            {"name": "📈 訓練負荷",   "value": val("訓練負荷"),  "inline": True},
         ]
 
         # 有功率數據才加入功率欄位（騎車專屬）
@@ -61,6 +56,13 @@ class DiscordNotifier:
                 {"name": "⚡ 平均功率", "value": val("平均功率_W", "W"),       "inline": True},
                 {"name": "⚡ NP 標準化功率", "value": val("標準化功率_NP_W", "W"), "inline": True},
                 {"name": "⚡ 最大功率", "value": val("最大功率_W", "W"),       "inline": True},
+            ])
+
+        # 訓練效果（有氧/無氧），有值才加入
+        if cleaned_data.get("有氧訓練效果") is not None or cleaned_data.get("無氧訓練效果") is not None:
+            fields.extend([
+                {"name": "🫀 有氧訓練效果", "value": val("有氧訓練效果"), "inline": True},
+                {"name": "💥 無氧訓練效果", "value": val("無氧訓練效果"), "inline": True},
             ])
 
         # ── AI 報告（截斷至安全長度）─────────────────────────────────────
@@ -77,7 +79,7 @@ class DiscordNotifier:
             "color":       color,
             "fields":      fields,
             "footer": {
-                "text": f"Strava ID: {activity_id}  ·  分析時間: {now_str}",
+                "text": f"Garmin ID: {activity_id}  ·  分析時間: {now_str}",
             },
             "thumbnail": {
                 # 腳踏車 emoji 作為縮圖
@@ -95,11 +97,40 @@ class DiscordNotifier:
         return {
             "title":       "📅 接下來的訓練計畫",
             "description": plan_display,
-            "color":       0x57F287,  # Discord 綠，象徵往前衝
+            "color":       PLAN_COLOR,  # Discord 綠，象徵往前衝
         }
 
-    def _build_payload(self, cleaned_data: dict, ai_report: str, training_plan: str = "") -> dict:
+    def _build_wellness_embed(self, wellness_data: dict) -> Optional[dict]:
+        """
+        當日恢復數據摘要 Embed。通用作法：列出 wellness_data 內所有非 None 欄位，
+        與 wellness_client 的輸出鍵解耦（wellness_client 保證輸出扁平的中文鍵→純量）。
+        全部為 None（該日無恢復數據）時回 None，呼叫端不加這塊 Embed。
+        """
+        fields = [
+            {"name": str(key), "value": str(value), "inline": True}
+            for key, value in wellness_data.items()
+            if value is not None
+        ]
+        if not fields:
+            return None
+        return {
+            "title":  "🌙 當日恢復狀態",
+            "color":  WELLNESS_COLOR,
+            "fields": fields[:25],   # Discord embed 單則上限 25 個 field
+        }
+
+    def _build_payload(
+        self,
+        cleaned_data: dict,
+        ai_report: str,
+        training_plan: str = "",
+        wellness_data: Optional[dict] = None,
+    ) -> dict:
         embeds = [self._build_embed(cleaned_data, ai_report)]
+        if wellness_data:
+            wellness_embed = self._build_wellness_embed(wellness_data)
+            if wellness_embed:
+                embeds.append(wellness_embed)
         if training_plan:
             embeds.append(self._build_plan_embed(training_plan))
         return {
@@ -109,9 +140,15 @@ class DiscordNotifier:
 
     # ── 發送 ──────────────────────────────────────────────────────────────
 
-    def send(self, cleaned_data: dict, ai_report: str, training_plan: str = "") -> None:
-        """組裝 Embed 並發送到 Discord Webhook。training_plan 為選填。"""
-        payload = self._build_payload(cleaned_data, ai_report, training_plan)
+    def send(
+        self,
+        cleaned_data: dict,
+        ai_report: str,
+        training_plan: str = "",
+        wellness_data: Optional[dict] = None,
+    ) -> None:
+        """組裝 Embed 並發送到 Discord Webhook。training_plan 與 wellness_data 為選填。"""
+        payload = self._build_payload(cleaned_data, ai_report, training_plan, wellness_data)
         resp    = requests.post(self.webhook_url, json=payload, timeout=10)
 
         # Discord 成功回應：200（有內容）或 204（無內容）
