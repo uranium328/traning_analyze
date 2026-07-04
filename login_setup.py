@@ -21,28 +21,75 @@ import getpass
 import sys
 
 
+class MfaAborted(Exception):
+    """使用者在 MFA 提示留空中止——通常代表密碼輸入錯誤，而非帳號真的需要 MFA。"""
+
+
+def _resolve_mfa_code(mfa_flow, input_fn=input) -> str:
+    """
+    取得 MFA 驗證碼；使用者留空按 Enter 則 raise MfaAborted。
+
+    背景（garminconnect 0.3.6 已知行為）：登入有多個策略，其中 web「widget」策略
+    以頁面標題判斷是否需要 MFA，而 Garmin 登入 widget 頁標題本身含
+    "Authentication Application"——因此**密碼輸入錯誤**卡在該頁時，會被誤判成需要 MFA。
+    故 widget 流程觸發時額外警告：沒開兩步驟驗證就代表密碼打錯，留空 Enter 即可乾淨中止。
+    （ios/portal 策略的 MFA 來自 API 明確回應，較可信，但同樣提供留空中止的安全閥。）
+    """
+    if mfa_flow == "widget":
+        print("\n[注意] 登入要求 MFA 驗證碼，但這一步在**密碼輸入錯誤**時也可能被誤觸。")
+        print("  · 帳號沒開兩步驟驗證 → 這代表密碼打錯了：直接按 Enter 中止，檢查密碼後重跑。")
+        print("  · 帳號確實有開兩步驟驗證 → 請輸入驗證碼。")
+    code = input_fn("請輸入 Garmin MFA 驗證碼（未開 MFA 請直接按 Enter 中止）：").strip()
+    if not code:
+        raise MfaAborted()
+    return code
+
+
 def main() -> None:
-    from garminconnect import Garmin
+    from garminconnect import Garmin, GarminConnectAuthenticationError
 
     print("===== Garmin 一次性登入設定 =====")
     email = input("Garmin 帳號 email：").strip()
     password = getpass.getpass("Garmin 密碼（輸入時不顯示）：")
 
-    garmin = Garmin(
-        email=email,
-        password=password,
-        prompt_mfa=lambda: input("請輸入 Garmin MFA 驗證碼：").strip(),
-    )
+    # 用 return_on_mfa=True 的兩階段流程：login() 遇到 MFA 只回傳 ("needs_mfa", None)，
+    # 不在函式內部呼叫 prompt_mfa。原因：Garmin.login() 有個 catch-all（__init__.py）
+    # 會把內部丟出的例外一律轉成 ConnectionError——若在那裡面 raise 中止訊號會被吞掉。
+    # 改成回傳後由本程式接手，密碼錯誤（mobile 策略明確回報）能乾淨區分、中止也乾淨。
+    garmin = Garmin(email=email, password=password, return_on_mfa=True)
     try:
-        garmin.login()
+        mfa_status, _ = garmin.login()
+    except GarminConnectAuthenticationError as e:
+        print(f"\n[登入失敗] 帳號或密碼錯誤：{e}", file=sys.stderr)
+        print("請確認 Garmin 帳密後重跑：python login_setup.py", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
         print(f"\n[登入失敗] {e}", file=sys.stderr)
         print(
-            "請確認帳密與 MFA 是否正確；若持續失敗，可能是 garminconnect 需升級"
+            "若持續失敗，可能是 Garmin 端風控或 garminconnect 需升級"
             "（pip install -U garminconnect）。",
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # 需要 MFA：此時控制權在我們手上（不在被 catch-all 包住的 login 內部）。
+    if mfa_status == "needs_mfa":
+        mfa_flow = getattr(getattr(garmin, "client", None), "_mfa_flow", None)
+        try:
+            mfa_code = _resolve_mfa_code(mfa_flow)
+        except MfaAborted:
+            print(
+                "\n已中止：未輸入 MFA 驗證碼（多半是密碼打錯）。"
+                "請確認 Garmin 密碼正確後重跑：python login_setup.py",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        try:
+            garmin.resume_login({}, mfa_code)   # client_state 被忽略，MFA 狀態存在 client 上
+        except Exception as e:
+            print(f"\n[MFA 驗證失敗] {e}", file=sys.stderr)
+            print("請確認驗證碼正確且未過期後重跑：python login_setup.py", file=sys.stderr)
+            sys.exit(1)
 
     token_json = garmin.client.dumps()
     token_b64 = base64.b64encode(token_json.encode("utf-8")).decode("ascii")
